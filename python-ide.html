@@ -19,10 +19,14 @@
     .editor-area { flex-basis:50%; flex-grow:0; flex-shrink:0; min-height:80px; box-sizing:border-box; overflow:hidden; }
     .splitter { height:8px; background:#f0f0f0; cursor:row-resize; display:flex; align-items:center; justify-content:center; }
     .splitter:after { content:""; width:36px; height:4px; background:#ccc; border-radius:2px; }
-    .output-area { flex-basis:50%; flex-grow:0; flex-shrink:0; min-height:80px; box-sizing:border-box; background:#0b0b0b; color:#b6f39b; padding:8px; white-space:pre-wrap; overflow:auto; resize:none; }
+    .output-area { flex-basis:50%; flex-grow:0; flex-shrink:0; min-height:80px; box-sizing:border-box; background:#0b0b0b; color:#b6f39b; padding:8px; white-space:pre-wrap; overflow:auto; resize:none; position:relative; }
     .CodeMirror { height:100% !important; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Courier New", monospace; }
     .controls { display:flex; gap:8px; align-items:center; }
     .note { font-size:12px; color:#666; margin-left:8px; }
+    .input-line { display:flex; align-items:center; margin-top:4px; }
+    .input-prompt { color:#00bfff; margin-right:4px; }
+    .input-field { background:#1a1a1a; color:#b6f39b; border:1px solid #444; padding:4px 8px; flex:1; font-family:inherit; font-size:inherit; outline:none; }
+    .input-field:focus { border-color:#00bfff; }
     /* make run button visually green */
     .run-green { background:#16a34a; color:white; border:1px solid rgba(0,0,0,0.08); }
     .run-green:hover { filter:brightness(0.95); }
@@ -76,13 +80,10 @@ for n in ["Alice","Bob","Student"]:
 
         <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" aria-label="Resize code and terminal"></div>
 
-        <pre id="output" class="output-area" aria-live="polite">Python ready.</pre>
+        <div id="output" class="output-area" aria-live="polite">Python ready.</div>
       </div>
 
       <div style="height:6px;"></div>
-      <div style="display:flex; align-items:center; gap:8px;">
-        <div class="note">Runtime: Pyodide (client-side)</div>
-      </div>
     </div>
   </div>
 
@@ -90,15 +91,11 @@ for n in ["Alice","Bob","Student"]:
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/python/python.min.js"></script>
 
-  <script>
-    // dynamic load of pyodide
-    (function () {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js';
-      s.onload = initPyodide;
-      document.head.appendChild(s);
-    })();
+  <!-- Skulpt for Python execution -->
+  <script src="https://skulpt.org/js/skulpt.min.js"></script>
+  <script src="https://skulpt.org/js/skulpt-stdlib.js"></script>
 
+  <script>
     // ---------- helpers ----------
     function b64EncodeUnicode(str) {
       return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, function(match,p1){ return String.fromCharCode('0x' + p1); }));
@@ -117,22 +114,10 @@ for n in ["Alice","Bob","Student"]:
     }
 
     // ---------- state ----------
-    let pyodide = null;
     let editor = null;
     const templateNode = document.getElementById('code');
     const defaultTemplate = templateNode.textContent.trim();
     let initialCode = defaultTemplate; // frame-specific initial code
-
-    async function initPyodide() {
-      const out = document.getElementById('output');
-      out.textContent = 'Python ready.'; // start message
-      try {
-        pyodide = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.23.4/full/' });
-      } catch (e) {
-        out.textContent = 'Failed to load Pyodide: ' + e;
-        console.error(e);
-      }
-    }
 
     document.addEventListener('DOMContentLoaded', () => {
       // CodeMirror init
@@ -258,36 +243,80 @@ for n in ["Alice","Bob","Student"]:
       window.addEventListener('resize', ()=> editor.refresh && editor.refresh());
     });
 
-    // capture python stdout/stderr to JS
-    window.writeOutputLine = function(s) {
+    // Skulpt output handler
+    function outf(text) {
       const out = document.getElementById('output');
-      out.textContent += s;
+      out.appendChild(document.createTextNode(text));
       out.scrollTop = out.scrollHeight;
-    };
+    }
+
+    // Skulpt input handler - creates interactive input field
+    function builtinRead(x) {
+      if (Sk.builtinFiles === undefined || Sk.builtinFiles["files"][x] === undefined)
+        throw "File not found: '" + x + "'";
+      return Sk.builtinFiles["files"][x];
+    }
+
+    function inputHandler(prompt) {
+      return new Promise((resolve) => {
+        const out = document.getElementById('output');
+        
+        // Display the prompt
+        if (prompt) {
+          out.appendChild(document.createTextNode(prompt));
+        }
+        
+        // Create input line
+        const inputLine = document.createElement('div');
+        inputLine.className = 'input-line';
+        
+        const inputField = document.createElement('input');
+        inputField.type = 'text';
+        inputField.className = 'input-field';
+        
+        inputLine.appendChild(inputField);
+        out.appendChild(inputLine);
+        
+        // Focus the input
+        inputField.focus();
+        out.scrollTop = out.scrollHeight;
+        
+        // Handle submission
+        inputField.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            const value = inputField.value;
+            inputField.disabled = true;
+            inputField.style.opacity = '0.7';
+            
+            // Show the entered value on a new line
+            out.appendChild(document.createTextNode('\n'));
+            
+            resolve(value);
+          }
+        });
+      });
+    }
 
     async function runCode() {
-      if (!pyodide) {
-        const out = document.getElementById('output');
-        out.textContent = 'Python ready.';
-        return;
-      }
       const code = editor.getValue();
       const out = document.getElementById('output');
       out.textContent = ''; // clear before run
+      
+      // Configure Skulpt
+      Sk.configure({
+        output: outf,
+        read: builtinRead,
+        inputfun: inputHandler,
+        inputfunTakesPrompt: true,
+        __future__: Sk.python3
+      });
+
       try {
-        await pyodide.runPythonAsync(`
-import sys, js
-class _Writer:
-    def write(self, x):
-        if x:
-            js.writeOutputLine(x)
-    def flush(self): pass
-sys.stdout = _Writer()
-sys.stderr = _Writer()
-`);
-        await pyodide.runPythonAsync(code);
+        await Sk.misceval.asyncToPromise(() => {
+          return Sk.importMainWithBody("<stdin>", false, code, true);
+        });
       } catch (err) {
-        out.textContent += '\\nError:\\n' + err;
+        out.appendChild(document.createTextNode('\nError:\n' + err.toString()));
         console.error(err);
       }
     }
